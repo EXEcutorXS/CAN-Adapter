@@ -24,6 +24,8 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_cdc_if.h"
 
+#define VERSION 0x01010101
+
 #define BAD_FORMAT 1
 #define TOO_LONG 2
 #define TOO_BIG_EXT_ID 3
@@ -34,14 +36,31 @@ typedef struct {
 	uint8_t buf[8];
 } rxMessage_t;
 
-rxMessage_t messages[16];
-uint8_t usbBuf[256];
+rxMessage_t recMsgs[16];
+uint8_t usbBuf[48];
+uint8_t idString[16];
+uint8_t errorString[40];
 uint8_t usbPtr = 0;
-uint8_t gotMessage = 0;
+uint8_t usbMesLen = 0;
+uint8_t gotUsbMessage = 0;
 
-uint8_t ptr = 0;
+uint8_t recCnt = 0;
+uint8_t canState = 0;
 uint32_t lastRx = 0;
+uint32_t lastTx = 0;
+uint32_t totalRXCnt = 0;
+uint32_t totalTXCnt = 0;
 CAN_FilterTypeDef filter;
+uint32_t mailBox = 0;
+
+uint8_t listen = 1;
+
+uint8_t len;
+uint8_t txData[8] = { 0, };
+uint8_t outString[32] = { 0, };
+CAN_TxHeaderTypeDef header = { 0, };
+uint16_t bitrate = 0;
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -61,6 +80,8 @@ CAN_FilterTypeDef filter;
 /* Private variables ---------------------------------------------------------*/
 CAN_HandleTypeDef hcan;
 
+IWDG_HandleTypeDef hiwdg;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -69,12 +90,27 @@ CAN_HandleTypeDef hcan;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_CAN_Init(void);
+static void MX_IWDG_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+void handleError(char *str) {
+	CDC_Transmit_FS((uint8_t*)str, strlen((char*) str));
+	CDC_Transmit_FS((uint8_t*)"\r\n", 4);
+	CDC_Transmit_FS((uint8_t*) "##########\r\n", strlen("##########\r\n"));
+
+	Error_Handler();
+}
+uint32_t pow10_(uint8_t value) {
+	if (value > 0)
+		return 10 * pow10_(value - 1);
+	else
+		return 1;
+}
 
 uint32_t DecToInt(uint8_t *string, uint8_t len) {
 	uint32_t value = 0;
@@ -83,10 +119,14 @@ uint32_t DecToInt(uint8_t *string, uint8_t len) {
 		if (string[i] >= '0' && string[i] <= '9')
 			value += (string[i] - '0') * pow10_(len - i - 1);
 		else {
-			Error_Handler();
+			handleError("Cant convert into int, not a number!");
 			return 0xFFFFFFFF;
 		}
 	return value;
+}
+
+uint32_t pow16(uint8_t value) {
+	return 1 << (value * 4);
 }
 
 uint32_t HexToInt(uint8_t *string, uint8_t len) {
@@ -151,7 +191,7 @@ uint32_t HexToInt(uint8_t *string, uint8_t len) {
 			tmp = 15;
 			break;
 		default:
-			Error_Handler();
+			handleError("Can't parse hex value! Invalid string!");
 			return 0xFFFFFFFF;
 		}
 		value += tmp * pow16(len - i - 1);
@@ -159,97 +199,29 @@ uint32_t HexToInt(uint8_t *string, uint8_t len) {
 	return value;
 }
 
-uint32_t HexToByte(uint8_t *string) {
-	uint32_t value = 0;
-	uint32_t tmp = 0;
-	uint8_t i = 0;
-
-	while (string[i] != 0 && i < 2) {
-		switch (string[i]) {
-		case '0':
-			tmp = 0;
-			break;
-		case '1':
-			tmp = 1;
-			break;
-		case '2':
-			tmp = 2;
-			break;
-		case '3':
-			tmp = 3;
-			break;
-		case '4':
-			tmp = 4;
-			break;
-		case '5':
-			tmp = 5;
-			break;
-		case '6':
-			tmp = 6;
-			break;
-		case '7':
-			tmp = 7;
-			break;
-		case '8':
-			tmp = 8;
-			break;
-		case '9':
-			tmp = 9;
-			break;
-		case 'A':
-		case 'a':
-			tmp = 10;
-			break;
-		case 'B':
-		case 'b':
-			tmp = 11;
-			break;
-		case 'C':
-		case 'c':
-			tmp = 12;
-			break;
-		case 'D':
-		case 'd':
-			tmp = 13;
-			break;
-		case 'E':
-		case 'e':
-			tmp = 14;
-			break;
-		case 'F':
-		case 'f':
-			tmp = 15;
-			break;
-		default:
-			Error_Handler();
-			return 0xFFFFFFFF;
-		}
-		value = (value << 4) | tmp;
-		i++;
-	}
-	return value;
-}
-
 void reportError(uint8_t errorCode) {
-	uint8_t errorBuf[2] = { 'E', errorCode };
-	CDC_Transmit_FS(errorBuf, 2);
+	char error[64] = { 0, };
+	sprintf(error, "<E%d>\r\n", errorCode);
+	CDC_Transmit_FS((uint8_t*) error, strlen(error));
 }
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
-	if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &messages[ptr].header, messages[ptr].buf) != HAL_OK)
+	if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &recMsgs[recCnt].header, recMsgs[recCnt].buf) != HAL_OK)
 		Error_Handler();
+	if (recCnt < 16)
+		recCnt++;
 
-	ptr++;
-	if (ptr > 15)
-		ptr = 0;
 	lastRx = HAL_GetTick();
+	totalRXCnt++;
 }
 
 void CDC_ReceiveCallback(uint8_t *Buf, uint32_t len) {
 	if (*Buf == '<')
 		usbPtr = 0;
 	else if (*Buf == '>') {
+		usbMesLen = usbPtr;
+		gotUsbMessage = 1;
 		usbBuf[usbPtr] = 0;
-		gotMessage = 1;
+		usbPtr = 0;
 	} else {
 		memcpy(usbBuf + usbPtr, Buf, len);
 		usbPtr += len;
@@ -288,7 +260,10 @@ int main(void) {
 	MX_GPIO_Init();
 	MX_CAN_Init();
 	MX_USB_DEVICE_Init();
+	MX_IWDG_Init();
 	/* USER CODE BEGIN 2 */
+	DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP_Msk;
+	DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_WWDG_STOP_Msk;
 
 	/* USER CODE END 2 */
 
@@ -305,23 +280,37 @@ int main(void) {
 	filter.SlaveStartFilterBank = 14;
 
 	if (HAL_CAN_ConfigFilter(&hcan, &filter) != HAL_OK)
-		Error_Handler();
+		handleError("Cant' config CAN filter!");
 
 	if (HAL_CAN_Start(&hcan) != HAL_OK)
-		Error_Handler();
-
+		handleError("Cant' start CAN!");
+	canState = 1;
 	if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
-		Error_Handler();
+		handleError("Cant' attach CAN IRQ!");
 
 	if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_ERROR) != HAL_OK)
-		Error_Handler();
-
+		handleError("Cant' attach CAN IRQ!");
+	CDC_Transmit_FS((uint8_t*) "Reset\r\n", strlen("Reset\r\n"));
 	while (1) {
-		uint8_t len;
-
-		if (ptr > 0) {
-			CDC_Transmit_FS(messages[ptr - 1].buf, messages[ptr - 1].header.DLC);
-			ptr--;
+		HAL_IWDG_Refresh(&hiwdg);
+		if (recCnt > 0) {
+			uint8_t cur = recCnt - 1;
+			CAN_RxHeaderTypeDef *hdr = &recMsgs[cur].header;
+			sprintf((char*) outString, "<R%1d%1d%1d_", (int) hdr->DLC, (int) hdr->IDE, (int) hdr->RTR);
+			if (!hdr->IDE) {
+				sprintf((char*) idString, "%03lX_", hdr->StdId);
+			} else {
+				sprintf((char*) idString, "%08lX_", hdr->ExtId);
+			}
+			strcat((char*) outString, (char*) idString);
+			for (int i = 0; i < hdr->DLC; i++) {
+				char byteString[3];
+				sprintf(byteString, "%02X", recMsgs[cur].buf[i]);
+				strcat((char*) outString, byteString);
+			}
+			strcat((char*) outString, ">\r\n");
+			CDC_Transmit_FS(outString, strlen((char*) outString));
+			recCnt--;
 		}
 
 		if (HAL_GetTick() - lastRx < 20)
@@ -329,61 +318,101 @@ int main(void) {
 		else
 			HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 1);
 
-		if (gotMessage) {
-			gotMessage = 0;
+		if (HAL_GetTick() - lastTx < 20)
+			HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
+		else
+			HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 1);
+
+		if (gotUsbMessage) {
+			uint8_t len = usbMesLen;
+			gotUsbMessage = 0;
 
 			switch (usbBuf[0]) {
 			case '1':
+				if (canState) {
+					CDC_Transmit_FS((uint8_t*) "CAN Adapter is already started \r\n", strlen("CAN Adapter is already started \r\n"));
+					break;
+				}
 				if (HAL_CAN_Start(&hcan) != HAL_OK)
-					Error_Handler();
-				if (HAL_CAN_ActivateNotification(&hcan,
-				CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
-					Error_Handler();
+					handleError("Cant' start CAN!");
+				canState = 1;
+				if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
+					handleError("Cant' attach CAN IRQ!");
 				if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_ERROR) != HAL_OK)
-					Error_Handler();
+					handleError("Cant' attach CAN IRQ!");
+				CDC_Transmit_FS((uint8_t*) "CAN Adapter turned ON\r\n", strlen("CAN Adapter turned ON\r\n"));
 				break;
 			case '2':
+				if (!canState) {
+					CDC_Transmit_FS((uint8_t*) "CAN Adapter is already stopped \r\n", strlen("CAN Adapter is already stopped \r\n"));
+					break;
+				}
 				if (HAL_CAN_Stop(&hcan) != HAL_OK)
-					Error_Handler();
+					handleError("Cant' stop CAN!");
+				canState = 0;
+				CDC_Transmit_FS((uint8_t*) "CAN Adapter turned OFF\r\n", strlen("CAN Adapter turned OFF\r\n"));
 			case '3':
 				if (HAL_CAN_ConfigFilter(&hcan, &filter) != HAL_OK)
-					Error_Handler();
+					handleError("Cant' config CAN filter!");
+				CDC_Transmit_FS((uint8_t*) "Filter set\r\n", strlen("Filter set\r\n"));
 				break;
 			case '4':
-				if (usbBuf[1] == 0)
+				if (usbBuf[1] == '0') {
 					filter.FilterMode = CAN_FILTERMODE_IDMASK;
-				else if (usbBuf[1] == 1)
+					CDC_Transmit_FS((uint8_t*) "Mask filter selected\r\n", strlen("Mask filter selected\r\n"));
+				} else if (usbBuf[1] == '1') {
 					filter.FilterMode = CAN_FILTERMODE_IDLIST;
-				else
+					CDC_Transmit_FS((uint8_t*) "List filter selected\r\n", strlen("List filter selected\r\n"));
+				} else
 					reportError(BAD_FORMAT);
+
 				break;
 			case '5':
-				filter.FilterMaskIdLow = HexToInt(usbBuf + 1);
+				filter.FilterMaskIdLow = HexToInt(usbBuf + 1, 8);
 				break;
 			case '6':
-				filter.FilterMaskIdHigh = HexToInt(usbBuf + 1);
+				filter.FilterMaskIdHigh = HexToInt(usbBuf + 1, 8);
 				break;
 			case '7':
-				filter.FilterIdLow = HexToInt(usbBuf + 1);
+				filter.FilterIdLow = HexToInt(usbBuf + 1, 8);
 				break;
 			case '8':
-				filter.FilterIdHigh = HexToInt(usbBuf + 1);
+				filter.FilterIdHigh = HexToInt(usbBuf + 1, 8);
 				break;
 			case '9':
-				uint16_t bitrate = DecToInt(usbBuf + 1, 4);
+				canState = 0;
+				HAL_CAN_Stop(&hcan);
+				HAL_CAN_DeInit(&hcan);
+				bitrate = DecToInt(usbBuf + 1, len - 1);
+				hcan.Instance = CAN;
+				hcan.Init.Prescaler = 3000 / bitrate;
+				hcan.Init.Mode = CAN_MODE_NORMAL;
+				hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+				hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
+				hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
+				hcan.Init.TimeTriggeredMode = DISABLE;
+				hcan.Init.AutoBusOff = DISABLE;
+				hcan.Init.AutoWakeUp = DISABLE;
+				hcan.Init.AutoRetransmission = DISABLE;
+				hcan.Init.ReceiveFifoLocked = DISABLE;
+				hcan.Init.TransmitFifoPriority = DISABLE;
+				if (HAL_CAN_Init(&hcan) != HAL_OK)
+					handleError("Cant' init CAN!");
+
+				sprintf((char*) outString, "Bitrate set to %d\r\n", bitrate);
+				CDC_Transmit_FS(outString, strlen((char*) outString));
 				break;
 			case 'T':
-
-				len = usbBuf[1];
+				len = usbBuf[1] - '0';
 				if (len > 8) {
 					reportError(TOO_LONG);
 					break;
 				}
 				uint8_t txData[8] = { 0, };
 				CAN_TxHeaderTypeDef header = { 0, };
-				header.DLC = DecToInt(usbBuf + 1, 1);
-				header.IDE = DecToInt(usbBuf + 2, 1);
-				header.RTR = DecToInt(usbBuf + 3, 1);
+				header.DLC = usbBuf[1]-'0';
+				header.IDE = usbBuf[2]-'0';
+				header.RTR = usbBuf[3]-'0';
 				if (header.IDE) {
 					header.ExtId = HexToInt(usbBuf + 4, 8);
 					if (header.ExtId > 0x1FFFFFFF) {
@@ -402,11 +431,35 @@ int main(void) {
 				for (uint8_t i = 0; i < header.DLC; ++i) {
 					txData[i] = HexToInt(usbBuf + 6 + header.IDE * 5 + 2 * i, 2);
 				}
-				HAL_CAN_AddTxMessage(&hcan, &header, txData, CAN_TX_MAILBOX0);
+				if (HAL_CAN_AddTxMessage(&hcan, &header, txData, &mailBox) != HAL_OK)
+					handleError("Can't send CAN message...");
+				totalTXCnt++;
+				lastTx = HAL_GetTick();
 				break;
 
-			}
+			case 't':
 
+				header.DLC = 8;
+				header.IDE = 1;
+				header.RTR = 0;
+				header.TransmitGlobalTime = 0;
+				header.ExtId = HexToInt(usbBuf + 1, 8);
+				for (uint8_t i = 0; i < header.DLC; ++i) {
+					txData[i] = HexToInt(usbBuf + 9 + 2 * i, 2);
+				}
+				HAL_CAN_AddTxMessage(&hcan, &header, txData, &mailBox);
+				totalTXCnt++;
+				lastTx = HAL_GetTick();
+				break;
+			case 'V':
+				sprintf((char*) outString, "<V%08x>\r\n", VERSION);
+				CDC_Transmit_FS(outString, (strlen((char*) outString)));
+				break;
+			default:
+				sprintf((char*) outString, "Command not supported\r\n");
+				CDC_Transmit_FS(outString, (strlen((char*) outString)));
+				break;
+			}
 		}
 		/* USER CODE END WHILE */
 
@@ -427,8 +480,9 @@ void SystemClock_Config(void) {
 	/** Initializes the RCC Oscillators according to the specified parameters
 	 * in the RCC_OscInitTypeDef structure.
 	 */
-	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48;
+	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48 | RCC_OSCILLATORTYPE_LSI;
 	RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
+	RCC_OscInitStruct.LSIState = RCC_LSI_ON;
 	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
 	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
 		Error_Handler();
@@ -487,6 +541,33 @@ static void MX_CAN_Init(void) {
 }
 
 /**
+ * @brief IWDG Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_IWDG_Init(void) {
+
+	/* USER CODE BEGIN IWDG_Init 0 */
+
+	/* USER CODE END IWDG_Init 0 */
+
+	/* USER CODE BEGIN IWDG_Init 1 */
+
+	/* USER CODE END IWDG_Init 1 */
+	hiwdg.Instance = IWDG;
+	hiwdg.Init.Prescaler = IWDG_PRESCALER_8;
+	hiwdg.Init.Window = 4095;
+	hiwdg.Init.Reload = 4095;
+	if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
+		Error_Handler();
+	}
+	/* USER CODE BEGIN IWDG_Init 2 */
+
+	/* USER CODE END IWDG_Init 2 */
+
+}
+
+/**
  * @brief GPIO Initialization Function
  * @param None
  * @retval None
@@ -521,6 +602,7 @@ static void MX_GPIO_Init(void) {
  */
 void Error_Handler(void) {
 	/* USER CODE BEGIN Error_Handler_Debug */
+
 	/* User can add his own implementation to report the HAL error return state */
 	__disable_irq();
 	while (1) {
