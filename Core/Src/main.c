@@ -46,6 +46,7 @@ uint8_t gotUsbMessage = 0;
 
 uint8_t recCnt = 0;
 uint8_t canState = 0;
+uint32_t canMode = CAN_MODE_NORMAL;
 uint32_t lastRx = 0;
 uint32_t lastTx = 0;
 uint32_t totalRXCnt = 0;
@@ -59,7 +60,7 @@ uint8_t len;
 uint8_t txData[8] = { 0, };
 uint8_t outString[32] = { 0, };
 CAN_TxHeaderTypeDef header = { 0, };
-uint16_t bitrate = 0;
+uint16_t bitrate = 250;
 
 /* USER CODE END Includes */
 
@@ -99,11 +100,16 @@ static void MX_IWDG_Init(void);
 /* USER CODE BEGIN 0 */
 
 void handleError(char *str) {
-	CDC_Transmit_FS((uint8_t*)str, strlen((char*) str));
-	CDC_Transmit_FS((uint8_t*)"\r\n", 4);
-	CDC_Transmit_FS((uint8_t*) "##########\r\n", strlen("##########\r\n"));
-
+	uint8_t finalString[128];
+	sprintf((char*) finalString, "<E%s>\r\n", str);
+	CDC_Transmit_FS(finalString, strlen((char*) finalString));
 	Error_Handler();
+}
+
+void printLog(char *str) {
+	uint8_t finalString[128];
+	sprintf((char*) finalString, "<P%s>\r\n", str);
+	CDC_Transmit_FS(finalString, strlen((char*) finalString));
 }
 uint32_t pow10_(uint8_t value) {
 	if (value > 0)
@@ -119,7 +125,7 @@ uint32_t DecToInt(uint8_t *string, uint8_t len) {
 		if (string[i] >= '0' && string[i] <= '9')
 			value += (string[i] - '0') * pow10_(len - i - 1);
 		else {
-			handleError("Cant convert into int, not a number!");
+			handleError("Can't convert into int, not a number!");
 			return 0xFFFFFFFF;
 		}
 	return value;
@@ -229,46 +235,68 @@ void CDC_ReceiveCallback(uint8_t *Buf, uint32_t len) {
 
 }
 
+void CanCustomInit() {
+	HAL_CAN_Stop(&hcan);
+	HAL_CAN_DeInit(&hcan);
+	hcan.Instance = CAN;
+	hcan.Init.Prescaler = 3000 / bitrate;
+	hcan.Init.Mode = canMode;
+	hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+	hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
+	hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
+	hcan.Init.TimeTriggeredMode = DISABLE;
+	hcan.Init.AutoBusOff = DISABLE;
+	hcan.Init.AutoWakeUp = DISABLE;
+	hcan.Init.AutoRetransmission = DISABLE;
+	hcan.Init.ReceiveFifoLocked = DISABLE;
+	hcan.Init.TransmitFifoPriority = DISABLE;
+	if (HAL_CAN_Init(&hcan) != HAL_OK)
+		handleError("Cant' init CAN!");
+	if (canState)
+		if (HAL_CAN_Start(&hcan) != HAL_OK)
+			handleError("Can't start CAN!");
+}
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
-int main(void) {
-	/* USER CODE BEGIN 1 */
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
 
-	/* USER CODE END 1 */
+  /* USER CODE END 1 */
 
-	/* MCU Configuration--------------------------------------------------------*/
+  /* MCU Configuration--------------------------------------------------------*/
 
-	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-	HAL_Init();
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
 
-	/* USER CODE BEGIN Init */
+  /* USER CODE BEGIN Init */
 
-	/* USER CODE END Init */
+  /* USER CODE END Init */
 
-	/* Configure the system clock */
-	SystemClock_Config();
+  /* Configure the system clock */
+  SystemClock_Config();
 
-	/* USER CODE BEGIN SysInit */
+  /* USER CODE BEGIN SysInit */
 
-	/* USER CODE END SysInit */
+  /* USER CODE END SysInit */
 
-	/* Initialize all configured peripherals */
-	MX_GPIO_Init();
-	MX_CAN_Init();
-	MX_USB_DEVICE_Init();
-	MX_IWDG_Init();
-	/* USER CODE BEGIN 2 */
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_CAN_Init();
+  MX_USB_DEVICE_Init();
+  MX_IWDG_Init();
+  /* USER CODE BEGIN 2 */
 	DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP_Msk;
 	DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_WWDG_STOP_Msk;
 
-	/* USER CODE END 2 */
+  /* USER CODE END 2 */
 
-	/* Infinite loop */
-	/* USER CODE BEGIN WHILE */
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
 
 	filter.FilterBank = 0;
 	filter.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -286,11 +314,11 @@ int main(void) {
 		handleError("Cant' start CAN!");
 	canState = 1;
 	if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
-		handleError("Cant' attach CAN IRQ!");
+		handleError("Cant' attach CAN RXD PENDING IRQ!");
 
 	if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_ERROR) != HAL_OK)
-		handleError("Cant' attach CAN IRQ!");
-	CDC_Transmit_FS((uint8_t*) "Reset\r\n", strlen("Reset\r\n"));
+		handleError("Cant' attach CAN ERROR IRQ!");
+	printLog("Reset");
 	while (1) {
 		HAL_IWDG_Refresh(&hiwdg);
 		if (recCnt > 0) {
@@ -313,12 +341,12 @@ int main(void) {
 			recCnt--;
 		}
 
-		if (HAL_GetTick() - lastRx < 20)
+		if (HAL_GetTick() - lastRx < 30)
 			HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 0);
 		else
 			HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 1);
 
-		if (HAL_GetTick() - lastTx < 20)
+		if (HAL_GetTick() - lastTx < 30)
 			HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
 		else
 			HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 1);
@@ -330,7 +358,7 @@ int main(void) {
 			switch (usbBuf[0]) {
 			case '1':
 				if (canState) {
-					CDC_Transmit_FS((uint8_t*) "CAN Adapter is already started \r\n", strlen("CAN Adapter is already started \r\n"));
+					printLog("CAN Adapter is already started");
 					break;
 				}
 				if (HAL_CAN_Start(&hcan) != HAL_OK)
@@ -340,29 +368,30 @@ int main(void) {
 					handleError("Cant' attach CAN IRQ!");
 				if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_ERROR) != HAL_OK)
 					handleError("Cant' attach CAN IRQ!");
-				CDC_Transmit_FS((uint8_t*) "CAN Adapter turned ON\r\n", strlen("CAN Adapter turned ON\r\n"));
+				printLog("CAN Adapter turned ON");
 				break;
 			case '2':
 				if (!canState) {
-					CDC_Transmit_FS((uint8_t*) "CAN Adapter is already stopped \r\n", strlen("CAN Adapter is already stopped \r\n"));
+					printLog("CAN Adapter is already stopped");
 					break;
 				}
 				if (HAL_CAN_Stop(&hcan) != HAL_OK)
 					handleError("Cant' stop CAN!");
 				canState = 0;
-				CDC_Transmit_FS((uint8_t*) "CAN Adapter turned OFF\r\n", strlen("CAN Adapter turned OFF\r\n"));
+				printLog("CAN Adapter turned OFF");
+				break;
 			case '3':
 				if (HAL_CAN_ConfigFilter(&hcan, &filter) != HAL_OK)
 					handleError("Cant' config CAN filter!");
-				CDC_Transmit_FS((uint8_t*) "Filter set\r\n", strlen("Filter set\r\n"));
+				printLog("Filter set");
 				break;
 			case '4':
 				if (usbBuf[1] == '0') {
 					filter.FilterMode = CAN_FILTERMODE_IDMASK;
-					CDC_Transmit_FS((uint8_t*) "Mask filter selected\r\n", strlen("Mask filter selected\r\n"));
+					printLog("Mask filter selected");
 				} else if (usbBuf[1] == '1') {
 					filter.FilterMode = CAN_FILTERMODE_IDLIST;
-					CDC_Transmit_FS((uint8_t*) "List filter selected\r\n", strlen("List filter selected\r\n"));
+					printLog("List filter selected");
 				} else
 					reportError(BAD_FORMAT);
 
@@ -380,39 +409,29 @@ int main(void) {
 				filter.FilterIdHigh = HexToInt(usbBuf + 1, 8);
 				break;
 			case '9':
-				canState = 0;
-				HAL_CAN_Stop(&hcan);
-				HAL_CAN_DeInit(&hcan);
 				bitrate = DecToInt(usbBuf + 1, len - 1);
-				hcan.Instance = CAN;
-				hcan.Init.Prescaler = 3000 / bitrate;
-				hcan.Init.Mode = CAN_MODE_NORMAL;
-				hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
-				hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
-				hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
-				hcan.Init.TimeTriggeredMode = DISABLE;
-				hcan.Init.AutoBusOff = DISABLE;
-				hcan.Init.AutoWakeUp = DISABLE;
-				hcan.Init.AutoRetransmission = DISABLE;
-				hcan.Init.ReceiveFifoLocked = DISABLE;
-				hcan.Init.TransmitFifoPriority = DISABLE;
-				if (HAL_CAN_Init(&hcan) != HAL_OK)
-					handleError("Cant' init CAN!");
-
-				sprintf((char*) outString, "Bitrate set to %d\r\n", bitrate);
-				CDC_Transmit_FS(outString, strlen((char*) outString));
+				CanCustomInit();
+				sprintf((char*) outString, "Bitrate set to %d kB/s", bitrate);
+				printLog((char*) outString);
 				break;
 			case 'T':
-				len = usbBuf[1] - '0';
-				if (len > 8) {
-					reportError(TOO_LONG);
+				if ((usbBuf[1] - '0') > 8) {
+					handleError("Message length can't be more than 8!");
+					break;
+				}
+				if ((usbBuf[2] - '0') > 9) {
+					handleError("IDE symbol must be a digit!");
+					break;
+				}
+				if ((usbBuf[3] - '0') > 9) {
+					handleError("RTR symbol must be a digit!");
 					break;
 				}
 				uint8_t txData[8] = { 0, };
 				CAN_TxHeaderTypeDef header = { 0, };
-				header.DLC = usbBuf[1]-'0';
-				header.IDE = usbBuf[2]-'0';
-				header.RTR = usbBuf[3]-'0';
+				header.DLC = usbBuf[1] - '0';
+				header.IDE = (usbBuf[2] == '0') ? 0 : 4;
+				header.RTR = (usbBuf[3] == '0') ? 0 : 2;
 				if (header.IDE) {
 					header.ExtId = HexToInt(usbBuf + 4, 8);
 					if (header.ExtId > 0x1FFFFFFF) {
@@ -429,7 +448,7 @@ int main(void) {
 
 				header.TransmitGlobalTime = 0;
 				for (uint8_t i = 0; i < header.DLC; ++i) {
-					txData[i] = HexToInt(usbBuf + 6 + header.IDE * 5 + 2 * i, 2);
+					txData[i] = HexToInt(usbBuf + 7 + (header.IDE != 0) * 5 + 2 * i, 2);
 				}
 				if (HAL_CAN_AddTxMessage(&hcan, &header, txData, &mailBox) != HAL_OK)
 					handleError("Can't send CAN message...");
@@ -440,7 +459,7 @@ int main(void) {
 			case 't':
 
 				header.DLC = 8;
-				header.IDE = 1;
+				header.IDE = 4;
 				header.RTR = 0;
 				header.TransmitGlobalTime = 0;
 				header.ExtId = HexToInt(usbBuf + 1, 8);
@@ -455,140 +474,173 @@ int main(void) {
 				sprintf((char*) outString, "<V%08x>\r\n", VERSION);
 				CDC_Transmit_FS(outString, (strlen((char*) outString)));
 				break;
+			case 'N':
+				canMode = CAN_MODE_NORMAL;
+				CanCustomInit();
+				printLog("Can mode set to NORMAL");
+				break;
+
+			case 'S':
+				canMode = CAN_MODE_SILENT;
+				CanCustomInit();
+				printLog("Can mode set to SILENT");
+				break;
+
+			case 'L':
+				canMode = CAN_MODE_LOOPBACK;
+				CanCustomInit();
+				printLog("Can mode set to LOOPBACK");
+				break;
+
+			case 'K':
+				canMode = CAN_MODE_SILENT_LOOPBACK;
+				CanCustomInit();
+				printLog("Can mode set to SILENT LOOPBACK");
+				break;
+
 			default:
-				sprintf((char*) outString, "Command not supported\r\n");
-				CDC_Transmit_FS(outString, (strlen((char*) outString)));
+				printLog("Command not supported");
 				break;
 			}
 		}
-		/* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
-		/* USER CODE BEGIN 3 */
+    /* USER CODE BEGIN 3 */
 	}
-	/* USER CODE END 3 */
+  /* USER CODE END 3 */
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
-void SystemClock_Config(void) {
-	RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
-	RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
-	RCC_PeriphCLKInitTypeDef PeriphClkInit = { 0 };
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
-	/** Initializes the RCC Oscillators according to the specified parameters
-	 * in the RCC_OscInitTypeDef structure.
-	 */
-	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48 | RCC_OSCILLATORTYPE_LSI;
-	RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
-	RCC_OscInitStruct.LSIState = RCC_LSI_ON;
-	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
-		Error_Handler();
-	}
-	/** Initializes the CPU, AHB and APB buses clocks
-	 */
-	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1;
-	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI48;
-	RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-	RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_LSI;
+  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI48;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
 
-	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) {
-		Error_Handler();
-	}
-	PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
-	PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
 
-	if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK) {
-		Error_Handler();
-	}
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 /**
- * @brief CAN Initialization Function
- * @param None
- * @retval None
- */
-static void MX_CAN_Init(void) {
+  * @brief CAN Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN_Init(void)
+{
 
-	/* USER CODE BEGIN CAN_Init 0 */
+  /* USER CODE BEGIN CAN_Init 0 */
 
-	/* USER CODE END CAN_Init 0 */
+  /* USER CODE END CAN_Init 0 */
 
-	/* USER CODE BEGIN CAN_Init 1 */
+  /* USER CODE BEGIN CAN_Init 1 */
 
-	/* USER CODE END CAN_Init 1 */
-	hcan.Instance = CAN;
-	hcan.Init.Prescaler = 12;
-	hcan.Init.Mode = CAN_MODE_NORMAL;
-	hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
-	hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
-	hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
-	hcan.Init.TimeTriggeredMode = DISABLE;
-	hcan.Init.AutoBusOff = DISABLE;
-	hcan.Init.AutoWakeUp = DISABLE;
-	hcan.Init.AutoRetransmission = DISABLE;
-	hcan.Init.ReceiveFifoLocked = DISABLE;
-	hcan.Init.TransmitFifoPriority = DISABLE;
-	if (HAL_CAN_Init(&hcan) != HAL_OK) {
-		Error_Handler();
-	}
-	/* USER CODE BEGIN CAN_Init 2 */
+  /* USER CODE END CAN_Init 1 */
+  hcan.Instance = CAN;
+  hcan.Init.Prescaler = 12;
+  hcan.Init.Mode = CAN_MODE_NORMAL;
+  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
+  hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
+  hcan.Init.TimeTriggeredMode = DISABLE;
+  hcan.Init.AutoBusOff = DISABLE;
+  hcan.Init.AutoWakeUp = DISABLE;
+  hcan.Init.AutoRetransmission = DISABLE;
+  hcan.Init.ReceiveFifoLocked = DISABLE;
+  hcan.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN_Init 2 */
 
-	/* USER CODE END CAN_Init 2 */
-
-}
-
-/**
- * @brief IWDG Initialization Function
- * @param None
- * @retval None
- */
-static void MX_IWDG_Init(void) {
-
-	/* USER CODE BEGIN IWDG_Init 0 */
-
-	/* USER CODE END IWDG_Init 0 */
-
-	/* USER CODE BEGIN IWDG_Init 1 */
-
-	/* USER CODE END IWDG_Init 1 */
-	hiwdg.Instance = IWDG;
-	hiwdg.Init.Prescaler = IWDG_PRESCALER_8;
-	hiwdg.Init.Window = 4095;
-	hiwdg.Init.Reload = 4095;
-	if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
-		Error_Handler();
-	}
-	/* USER CODE BEGIN IWDG_Init 2 */
-
-	/* USER CODE END IWDG_Init 2 */
+  /* USER CODE END CAN_Init 2 */
 
 }
 
 /**
- * @brief GPIO Initialization Function
- * @param None
- * @retval None
- */
-static void MX_GPIO_Init(void) {
-	GPIO_InitTypeDef GPIO_InitStruct = { 0 };
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
 
-	/* GPIO Ports Clock Enable */
-	__HAL_RCC_GPIOF_CLK_ENABLE();
-	__HAL_RCC_GPIOB_CLK_ENABLE();
-	__HAL_RCC_GPIOA_CLK_ENABLE();
+  /* USER CODE BEGIN IWDG_Init 0 */
 
-	/*Configure GPIO pin Output Level */
-	HAL_GPIO_WritePin(GPIOB, TX_LED_Pin | RX_LED_Pin, GPIO_PIN_RESET);
+  /* USER CODE END IWDG_Init 0 */
 
-	/*Configure GPIO pins : TX_LED_Pin RX_LED_Pin */
-	GPIO_InitStruct.Pin = TX_LED_Pin | RX_LED_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_4;
+  hiwdg.Init.Window = 4095;
+  hiwdg.Init.Reload = 4095;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOF_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, TX_LED_Pin|RX_LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : TX_LED_Pin RX_LED_Pin */
+  GPIO_InitStruct.Pin = TX_LED_Pin|RX_LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 }
 
@@ -597,17 +649,18 @@ static void MX_GPIO_Init(void) {
 /* USER CODE END 4 */
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
-void Error_Handler(void) {
-	/* USER CODE BEGIN Error_Handler_Debug */
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
 
 	/* User can add his own implementation to report the HAL error return state */
 	__disable_irq();
 	while (1) {
 	}
-	/* USER CODE END Error_Handler_Debug */
+  /* USER CODE END Error_Handler_Debug */
 }
 
 #ifdef  USE_FULL_ASSERT
