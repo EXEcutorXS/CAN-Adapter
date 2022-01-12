@@ -36,7 +36,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-
+void CanCustomInit();
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
