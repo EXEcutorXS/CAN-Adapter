@@ -32,7 +32,7 @@ typedef struct {
 } rxMessage_t;
 
 rxMessage_t recMsgs[16];
-uint8_t usbBuf[48];
+uint8_t usbBuf[128];
 char idString[16];
 char errorString[128];
 uint8_t error = 0;
@@ -327,11 +327,22 @@ int main(void) {
 		goto loopStart;
 	}
 	printLog("Reset");
+
+	HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
+	for (int i = 0; i < 10; ++i) {
+		HAL_IWDG_Refresh(&hiwdg);
+		HAL_Delay(50);
+		HAL_GPIO_TogglePin(TX_LED_GPIO_Port, TX_LED_Pin|RX_LED_Pin);
+	}
+
 	while (1) {
-		loopStart: HAL_IWDG_Refresh(&hiwdg);
+		loopStart:
+		HAL_IWDG_Refresh(&hiwdg);
 		if (error) {
 			error = 0;
 			CanCustomInit();
+			memset(usbBuf,0,sizeof(usbBuf));
+			usbPtr=0;
 		}
 
 		if (recCnt > 0) {
@@ -370,6 +381,7 @@ int main(void) {
 
 			switch (usbBuf[0]) {
 			case '1':
+				usbBuf[0]=0;
 				if (canState) {
 					printLog("CAN Adapter is already started");
 					break;
@@ -391,6 +403,7 @@ int main(void) {
 				printLog("CAN Adapter turned ON");
 				break;
 			case '2':
+				usbBuf[0]=0;
 				if (!canState) {
 					printLog("CAN Adapter is already stopped");
 					break;
@@ -403,6 +416,7 @@ int main(void) {
 				printLog("CAN Adapter turned OFF");
 				break;
 			case '3':
+				usbBuf[0]=0;
 				if (HAL_CAN_ConfigFilter(&hcan, &filter) != HAL_OK) {
 					handleError("Cant' config CAN filter!");
 					goto loopStart;
@@ -410,6 +424,7 @@ int main(void) {
 				printLog("Filter set");
 				break;
 			case '4':
+				usbBuf[0]=0;
 				if (usbBuf[1] == '0') {
 					filter.FilterMode = CAN_FILTERMODE_IDMASK;
 					printLog("Mask filter selected");
@@ -424,22 +439,27 @@ int main(void) {
 
 				break;
 			case '5':
+				usbBuf[0]=0;
 				filter.FilterMaskIdLow = HexToInt(usbBuf + 1, 8);
 				if (error) goto loopStart;
 				break;
 			case '6':
+				usbBuf[0]=0;
 				filter.FilterMaskIdHigh = HexToInt(usbBuf + 1, 8);
 				if (error) goto loopStart;
 				break;
 			case '7':
+				usbBuf[0]=0;
 				filter.FilterIdLow = HexToInt(usbBuf + 1, 8);
 				if (error) goto loopStart;
 				break;
 			case '8':
+				usbBuf[0]=0;
 				filter.FilterIdHigh = HexToInt(usbBuf + 1, 8);
 				if (error) goto loopStart;
 				break;
 			case '9':
+				usbBuf[0]=0;
 				bitrate = DecToInt(usbBuf + 1, len - 1);
 				if (error) goto loopStart;
 				if (bitrate == 0 || bitrate > 1000) {
@@ -452,6 +472,7 @@ int main(void) {
 				printLog(outString);
 				break;
 			case 'T':
+				usbBuf[0]=0;
 				if ((usbBuf[1] - '0') > 8) {
 					handleError("Message length can't be more than 8!");
 					goto loopStart;
@@ -506,7 +527,7 @@ int main(void) {
 				break;
 
 			case 't':
-
+				usbBuf[0]=0;
 				header.DLC = 8;
 				header.IDE = 4;
 				header.RTR = 0;
@@ -522,28 +543,33 @@ int main(void) {
 				lastTx = HAL_GetTick();
 				break;
 			case 'V':
+				usbBuf[0]=0;
 				sprintf(outString, "<V%08x>\r\n", VERSION);
 				CDC_Transmit_FS((uint8_t*) outString, (strlen(outString)));
 				break;
 			case 'N':
+				usbBuf[0]=0;
 				canMode = CAN_MODE_NORMAL;
 				CanCustomInit();
 				printLog("Can mode set to NORMAL");
 				break;
 
 			case 'S':
+				usbBuf[0]=0;
 				canMode = CAN_MODE_SILENT;
 				CanCustomInit();
 				printLog("Can mode set to SILENT");
 				break;
 
 			case 'L':
+				usbBuf[0]=0;
 				canMode = CAN_MODE_LOOPBACK;
 				CanCustomInit();
 				printLog("Can mode set to LOOPBACK");
 				break;
 
 			case 'K':
+				usbBuf[0]=0;
 				canMode = CAN_MODE_SILENT_LOOPBACK;
 				CanCustomInit();
 				printLog("Can mode set to SILENT LOOPBACK");
