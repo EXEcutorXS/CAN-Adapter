@@ -31,7 +31,7 @@ typedef struct {
 	uint8_t buf[8];
 } rxMessage_t;
 
-rxMessage_t recMsgs[16];
+rxMessage_t recMsgs[128];
 uint8_t usbBuf[128];
 char idString[16];
 char errorString[128];
@@ -206,7 +206,7 @@ uint32_t HexToInt(uint8_t *string, uint8_t len) {
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
 	if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &recMsgs[recCnt].header, recMsgs[recCnt].buf) != HAL_OK)
 		Error_Handler();
-	if (recCnt < 16)
+	if (recCnt < 128)
 		recCnt++;
 
 	lastRx = HAL_GetTick();
@@ -214,7 +214,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
 }
 
 void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan) {
-	handleError("CAN Adapter error acquired. Restarting CAN");
+	handleError("CAN BUS error acquired. Restarting CAN");
 }
 
 void CDC_ReceiveCallback(uint8_t *Buf, uint32_t len) {
@@ -328,13 +328,6 @@ int main(void) {
 	}
 	printLog("Reset");
 
-	HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, 0);
-	for (int i = 0; i < 10; ++i) {
-		HAL_IWDG_Refresh(&hiwdg);
-		HAL_Delay(50);
-		HAL_GPIO_TogglePin(TX_LED_GPIO_Port, TX_LED_Pin|RX_LED_Pin);
-	}
-
 	while (1) {
 		loopStart:
 		HAL_IWDG_Refresh(&hiwdg);
@@ -365,7 +358,7 @@ int main(void) {
 			recCnt--;
 		}
 
-		if (HAL_GetTick() - lastRx < 30)
+		if (HAL_GetTick() - lastRx < 30 || recCnt==128)
 			HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 0);
 		else
 			HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, 1);
