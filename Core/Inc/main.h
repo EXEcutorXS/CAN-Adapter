@@ -61,6 +61,8 @@ void Error_Handler(void);
 #define TX_LED_GPIO_Port GPIOB
 #define RX_LED_Pin GPIO_PIN_1
 #define RX_LED_GPIO_Port GPIOB
+#define USB_PULLUP_Pin GPIO_PIN_3
+#define USB_PULLUP_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */
